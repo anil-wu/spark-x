@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin"
 import * as path from "node:path"
 import { createHash } from "node:crypto"
 import { copyFile, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
+import { readUserToken } from "./sparkx_userinfo"
 
 function normalizeBaseUrl(raw: string) {
   const trimmed = raw.trim()
@@ -21,6 +22,16 @@ function shouldDefaultInsecureTls(apiBaseUrl: string) {
 
 function toPosixPath(p: string) {
   return p.replaceAll("\\", "/")
+}
+
+function inferProjectIdFromDirectory(directory: string) {
+  const normalized = toPosixPath(directory).replace(/\/+$/, "")
+  const parts = normalized.split("/").filter(Boolean)
+  if (parts.length < 2) return null
+  const projectIdRaw = parts[parts.length - 1]
+  const projectId = Number.parseInt(projectIdRaw, 10)
+  if (!Number.isFinite(projectId) || projectId <= 0) return null
+  return projectId
 }
 
 function safeResolveWithinBase(baseDir: string, relativePath: string) {
@@ -145,8 +156,8 @@ async function walkFiles(rootDir: string, relativeDir = ""): Promise<string[]> {
 export default tool({
   description: "提交构建版本：将已构建的构建产物目录上传到服务器，并记录构建版本（不执行构建）",
   args: {
+    userid: tool.schema.number().int().positive().describe("用户ID"),
     apiBaseUrl: tool.schema.string().optional().describe("sparkx api base url，如 http://host.docker.internal:6001"),
-    token: tool.schema.string().describe("用户 token（Bearer）"),
     projectId: tool.schema.number().int().positive().optional().describe("项目 ID（默认从目录推断）"),
     softwareName: tool.schema.string().default("game_client").describe("软件工程名称"),
     targetDir: tool.schema.string().optional().describe("构建产物目录（相对项目根目录，默认 build）"),
@@ -162,7 +173,7 @@ export default tool({
       process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"
     }
 
-    const projectId = args.projectId
+    const projectId = args.projectId ?? inferProjectIdFromDirectory(context.directory)
     if (!projectId) throw new Error("projectId is required (or ensure directory ends with /{projectId})")
     console.log(`[DEBUG] execute: projectId=${projectId}`)
 
@@ -170,6 +181,7 @@ export default tool({
     const targetRel = (args.targetDir || "build").replace(/\\/g, "/").replace(/\/+$/, "")
     const targetAbs = path.resolve(projectDir, targetRel)
 
+    const token = await readUserToken(context.directory, args.userid)
     const buildTime = new Date().toISOString()
     const uploadedFiles: Array<{
       path: string
@@ -181,7 +193,7 @@ export default tool({
 
     const softwareListResp: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "GET",
       pathname: `/api/v1/projects/${projectId}/softwares`,
       query: { page: "1", pageSize: "200" },
@@ -198,7 +210,7 @@ export default tool({
 
     const manifestResp: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "GET",
       pathname: `/api/v1/projects/${projectId}/software_manifests`,
       query: { software_ids: String(softwareId) },
@@ -215,7 +227,7 @@ export default tool({
 
     const draftResp: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "POST",
       pathname: "/api/v1/build-versions/draft",
       body: {
@@ -248,7 +260,7 @@ export default tool({
 
       const pre: any = await sparkxRequest({
         apiBaseUrl,
-        token: args.token,
+        token,
         method: "POST",
         pathname: `/api/v1/previews/builds/${buildVersionId}/preupload`,
         body: {
@@ -315,7 +327,7 @@ export default tool({
 
     const buildVersionPre: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "POST",
       pathname: "/api/v1/files/preupload",
       body: {
@@ -339,7 +351,7 @@ export default tool({
 
     const updatedBuildVersionResp: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "PUT",
       pathname: `/api/v1/build-versions/${buildVersionId}`,
       body: {

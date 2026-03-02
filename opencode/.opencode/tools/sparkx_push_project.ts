@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin"
 import * as path from "node:path"
 import { createHash } from "node:crypto"
 import { readFile, readdir, stat, writeFile } from "node:fs/promises"
+import { readUserToken } from "./sparkx_userinfo"
 
 function normalizeBaseUrl(raw: string) {
   const trimmed = raw.trim()
@@ -249,8 +250,8 @@ function parseManifestEntries(manifestJson: any): ManifestFileEntry[] {
 export default tool({
   description: "提交工程版本：提交本地软件工程变动到 sparkx，并创建新的软件工程版本（software manifest）",
   args: {
+    userid: tool.schema.number().int().positive().describe("用户ID"),
     apiBaseUrl: tool.schema.string().optional().describe("sparkx api base url，如 http://host.docker.internal:6001"),
-    token: tool.schema.string().describe("用户 token（Bearer）"),
     projectId: tool.schema.number().int().positive().optional().describe("项目 ID（默认从目录推断）"),
     mode: tool.schema.enum(["changed", "all"]).default("changed").describe("仅上传变更文件 / 上传全部文件"),
     maxFiles: tool.schema.number().int().positive().max(2000).default(500).describe("最多上传文件数"),
@@ -273,7 +274,8 @@ export default tool({
     const projectDir = context.directory
     console.log(`[DEBUG] execute: projectDir="${projectDir}"`)
 
-    const softwares = await listProjectSoftwares(apiBaseUrl, args.token, projectId)
+    const token = await readUserToken(context.directory, args.userid)
+    const softwares = await listProjectSoftwares(apiBaseUrl, token, projectId)
     const software = softwares.find((s) => s.name === args.softwareName)
     const softwareId = Number(software?.id)
     if (!Number.isFinite(softwareId) || softwareId <= 0) {
@@ -283,7 +285,7 @@ export default tool({
     const baseRel = toPosixPath(path.posix.join("game", args.softwareName)).replace(/^\/+/, "")
     const softwareAbsDir = safeResolveWithinBase(projectDir, baseRel)
 
-    const latest = await getLatestSoftwareManifestMeta(apiBaseUrl, args.token, projectId, softwareId)
+    const latest = await getLatestSoftwareManifestMeta(apiBaseUrl, token, projectId, softwareId)
     let remoteEntriesByPath = new Map<string, ManifestFileEntry>()
     let remoteVersionNumber: number | null = null
     let remoteManifestId: number | null = null
@@ -294,7 +296,7 @@ export default tool({
 
       const meta: any = await sparkxRequest({
         apiBaseUrl,
-        token: args.token,
+        token,
         method: "GET",
         pathname: `/api/v1/files/${latest.manifestFileId}/download`,
         query: { versionId: String(latest.manifestFileVersionId) },
@@ -348,7 +350,7 @@ export default tool({
       const { fileCategory, fileFormat } = fileMetaByPath(nameInProject)
       const pre: any = await sparkxRequest({
         apiBaseUrl,
-        token: args.token,
+        token,
         method: "POST",
         pathname: "/api/v1/files/preupload",
         body: {
@@ -454,7 +456,7 @@ export default tool({
 
     const manifestPre: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "POST",
       pathname: "/api/v1/files/preupload",
       body: {
@@ -478,7 +480,7 @@ export default tool({
 
     const createdManifest: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "POST",
       pathname: "/api/v1/software-manifests",
       body: {

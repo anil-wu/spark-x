@@ -1,0 +1,12 @@
+{
+  "name": "opencode-workspace-manage",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "node src/server.js",
+    "start": "node src/server.js",
+    "check": "node --check src/server.js"
+  }
+}
+

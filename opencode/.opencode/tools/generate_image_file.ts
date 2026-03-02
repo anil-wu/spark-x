@@ -31,6 +31,7 @@ export default tool({
   description:
     "生成图片并保存到指定目录，返回文件相对路径（当前为占位图，用于先打通流程）",
   args: {
+    userid: tool.schema.number().int().positive().describe("用户ID"),
     prompt: tool.schema.string().optional().describe("图片生成提示词（当前占位，不参与生成）"),
     outputDir: tool.schema
       .string()

@@ -1,6 +1,7 @@
 import { tool } from "@opencode-ai/plugin"
 import * as path from "node:path"
 import { access, mkdir, writeFile } from "node:fs/promises"
+import { readUserToken } from "./sparkx_userinfo"
 
 function normalizeBaseUrl(raw: string) {
   const trimmed = raw.trim()
@@ -144,8 +145,8 @@ async function pickGameDirName(projectRoot: string) {
 export default tool({
   description: "拉取项目工程：从 sparkx 按 software manifests 拉取工程文件到本地工作目录",
   args: {
+    userid: tool.schema.number().int().positive().describe("用户ID"),
     apiBaseUrl: tool.schema.string().optional().describe("sparkx api base url，如 https://localhost:8890 或 https://host.docker.internal:8890"),
-    token: tool.schema.string().describe("用户 token（Bearer）"),
     projectId: tool.schema.number().int().positive().optional().describe("项目 ID（默认从目录推断）"),
     mode: tool.schema.enum(["overwrite", "skip_existing", "dry_run"]).default("overwrite").describe("覆盖/跳过/仅展示"),
     pageSize: tool.schema.number().int().positive().max(500).default(200).describe("分页大小"),
@@ -167,12 +168,13 @@ export default tool({
     await ensureWorkspaceLayout(projectDir)
     const gameDirName = await pickGameDirName(projectDir)
 
+    const token = await readUserToken(context.directory, args.userid)
     const softwares: Array<{ id: number; name: string }> = []
     let page = 1
     while (true) {
       const resp: any = await sparkxJson({
         apiBaseUrl,
-        token: args.token,
+        token,
         pathname: `/api/v1/projects/${projectId}/softwares`,
         query: {
           page: String(page),
@@ -220,7 +222,7 @@ export default tool({
       const chunk = softwareIds.slice(i, i + chunkSize)
       const resp: any = await sparkxJson({
         apiBaseUrl,
-        token: args.token,
+        token,
         pathname: `/api/v1/projects/${projectId}/software_manifests`,
         query: {
           software_ids: chunk.join(","),
@@ -262,7 +264,7 @@ export default tool({
       const softwareName = softwareNameById.get(mr.softwareId) || `software_${mr.softwareId}`
       const manifestDownloadMeta: any = await sparkxJson({
         apiBaseUrl,
-        token: args.token,
+        token,
         pathname: `/api/v1/files/${mr.manifestFileId}/download`,
         query: { versionId: String(mr.manifestFileVersionId) },
       })
@@ -360,7 +362,7 @@ export default tool({
 
         const downloadMeta: any = await sparkxJson({
           apiBaseUrl,
-          token: args.token,
+          token,
           pathname: `/api/v1/files/${f.fileId}/download`,
           query: { versionId: String(f.fileVersionId) },
         })

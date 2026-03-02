@@ -6,11 +6,19 @@ RUN printf '%s\n' \
   > /etc/apk/repositories \
   && apk update \
   && apk add --no-cache \
-  git \
   nodejs \
-  npm \
-  openssh-client
+  npm
 
-COPY workspace_manage /opt/workspace_manage
-COPY start-all.sh /opt/start-all.sh
-RUN chmod +x /opt/start-all.sh
+WORKDIR /app
+
+COPY package.json ./package.json
+COPY src ./src
+
+ENV NODE_ENV=production
+ENV PORT=7070
+
+EXPOSE 7070
+
+ENTRYPOINT ["node"]
+CMD ["src/server.js"]
+

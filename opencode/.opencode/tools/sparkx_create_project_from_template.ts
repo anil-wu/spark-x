@@ -2,6 +2,7 @@ import { tool } from "@opencode-ai/plugin"
 import * as path from "node:path"
 import { execFile } from "node:child_process"
 import { copyFile, mkdir, readdir, rm, writeFile } from "node:fs/promises"
+import { readUserToken } from "./sparkx_userinfo"
 
 function normalizeBaseUrl(raw: string) {
   const trimmed = raw.trim()
@@ -189,8 +190,8 @@ function toSafeFileStem(input: string) {
 export default tool({
   description: "给项目创建新工程",
   args: {
+    userid: tool.schema.number().int().positive().describe("用户ID"),
     apiBaseUrl: tool.schema.string().optional().describe("sparkx api base url，如 http://host.docker.internal:6001"),
-    token: tool.schema.string().describe("用户 token（Bearer）"),
     projectId: tool.schema.number().int().positive().optional().describe("项目 ID（默认从目录推断）"),
     templateName: tool.schema
       .string()
@@ -209,6 +210,7 @@ export default tool({
     }
     const projectId = args.projectId ?? inferProjectIdFromDirectory(context.directory)
     if (!projectId) throw new Error("projectId is required (or ensure directory ends with /{projectId})")
+    const token = await readUserToken(context.directory, args.userid)
 
     const projectDir = context.directory
     await ensureWorkspaceLayout(projectDir)
@@ -218,7 +220,7 @@ export default tool({
 
     const templateInfo: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "GET",
       pathname: `/api/v1/software-templates/by-name/${encodeURIComponent(templateName)}`,
     })
@@ -234,7 +236,7 @@ export default tool({
 
     const downloadMeta: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "GET",
       pathname: `/api/v1/files/${archiveFileId}/download-template`,
     })
@@ -272,7 +274,7 @@ export default tool({
 
     const softwaresResp: any = await sparkxRequest({
       apiBaseUrl,
-      token: args.token,
+      token,
       method: "GET",
       pathname: `/api/v1/projects/${projectId}/softwares`,
       query: { page: "1", pageSize: "200" },
@@ -286,7 +288,7 @@ export default tool({
         ? { skipped: true, softwareId: existingSoftwareId }
         : await sparkxRequest({
             apiBaseUrl,
-            token: args.token,
+            token,
             method: "POST",
             pathname: `/api/v1/projects/${projectId}/softwares`,
             body: {
