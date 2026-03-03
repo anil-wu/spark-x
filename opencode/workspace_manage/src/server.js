@@ -1,7 +1,28 @@
 import http from "node:http"
 import path from "node:path"
+import { spawn } from "node:child_process"
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
 import { URL } from "node:url"
+
+function parseNewEntryName(kind, raw) {
+  const value = String(raw || "").trim()
+  if (!value) return { ok: false, error: `${kind} name is required` }
+  if (value === "." || value === "..") return { ok: false, error: `${kind} name is invalid` }
+  if (value.includes("/") || value.includes("\\")) return { ok: false, error: `${kind} name must not include slashes` }
+  if (value.includes("\0")) return { ok: false, error: `${kind} name is invalid` }
+  return { ok: true, value }
+}
+
+function normalizeRelativePath(kind, raw) {
+  const value = String(raw || "")
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+  if (!value) return { ok: true, value: "" }
+  if (value.includes("..")) return { ok: false, error: `${kind} is invalid` }
+  return { ok: true, value }
+}
 
 function readEnvInt(name, fallback) {
   const raw = process.env[name]
@@ -86,6 +107,18 @@ async function readJsonBody(req, limitBytes) {
   const text = Buffer.concat(chunks).toString("utf8")
   if (!text.trim()) return null
   return JSON.parse(text)
+}
+
+async function readRawBody(req, limitBytes) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    size += buf.length
+    if (size > limitBytes) throw new Error("payload too large")
+    chunks.push(buf)
+  }
+  return Buffer.concat(chunks)
 }
 
 async function ensureDir(dir) {
@@ -205,6 +238,82 @@ function isTextLikeMime(mime) {
   return false
 }
 
+function safeFilename(raw) {
+  const v = String(raw || "").trim() || "download"
+  return v.replaceAll('"', "'").replaceAll("\r", "").replaceAll("\n", "")
+}
+
+function parseMultipartContentType(contentType) {
+  const raw = String(contentType || "")
+  const match = raw.match(/boundary=([^;]+)/i)
+  if (!match) return { ok: false, error: "missing multipart boundary" }
+  const boundary = match[1].trim().replace(/^"|"$/g, "")
+  if (!boundary) return { ok: false, error: "missing multipart boundary" }
+  return { ok: true, boundary }
+}
+
+function parseContentDisposition(raw) {
+  const value = String(raw || "")
+  const parts = value.split(";").map(s => s.trim()).filter(Boolean)
+  const type = (parts.shift() || "").toLowerCase()
+  const params = {}
+  for (const p of parts) {
+    const eq = p.indexOf("=")
+    if (eq <= 0) continue
+    const k = p.slice(0, eq).trim().toLowerCase()
+    let v = p.slice(eq + 1).trim()
+    if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1)
+    params[k] = v
+  }
+  return { type, params }
+}
+
+function parseMultipart(buffer, boundary) {
+  const boundaryBuf = Buffer.from(`--${boundary}`)
+  const headerSep = Buffer.from("\r\n\r\n")
+  const crlf = Buffer.from("\r\n")
+
+  const parts = []
+  let pos = 0
+
+  while (true) {
+    const start = buffer.indexOf(boundaryBuf, pos)
+    if (start < 0) break
+    let partStart = start + boundaryBuf.length
+    if (buffer.slice(partStart, partStart + 2).equals(Buffer.from("--"))) break
+    if (buffer.slice(partStart, partStart + 2).equals(crlf)) partStart += 2
+
+    const next = buffer.indexOf(boundaryBuf, partStart)
+    if (next < 0) break
+
+    const headerEnd = buffer.indexOf(headerSep, partStart)
+    if (headerEnd < 0 || headerEnd > next) {
+      pos = next
+      continue
+    }
+
+    const headersRaw = buffer.slice(partStart, headerEnd).toString("utf8")
+    const headers = {}
+    for (const line of headersRaw.split("\r\n")) {
+      const idx = line.indexOf(":")
+      if (idx <= 0) continue
+      const key = line.slice(0, idx).trim().toLowerCase()
+      const val = line.slice(idx + 1).trim()
+      headers[key] = val
+    }
+
+    const contentStart = headerEnd + headerSep.length
+    let contentEnd = next - 2
+    if (contentEnd < contentStart) contentEnd = contentStart
+    const content = buffer.slice(contentStart, contentEnd)
+
+    parts.push({ headers, content })
+    pos = next
+  }
+
+  return parts
+}
+
 async function buildFileTree(rootAbs, { maxDepth, maxEntries }) {
   let remaining = maxEntries
 
@@ -290,6 +399,133 @@ const server = http.createServer(async (req, res) => {
       return json(req, res, 200, { ok: true, created, path: abs, userinfoPath: userinfoAbs })
     }
 
+    if (req.method === "POST" && url.pathname === "/api/projects/mkdir") {
+      const body = await readJsonBody(req, 1024 * 1024)
+
+      const userIdRes = parseId("userId", body?.userId)
+      if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
+      const projectIdRes = parseId("projectId", body?.projectId)
+      if (!projectIdRes.ok) return json(req, res, 400, { ok: false, error: projectIdRes.error })
+
+      const rootRes = normalizeProjectSubdir(body?.root || "game")
+      if (!rootRes.ok) return json(req, res, 400, { ok: false, error: rootRes.error })
+
+      const parentRes = normalizeRelativePath("parentPath", body?.parentPath)
+      if (!parentRes.ok) return json(req, res, 400, { ok: false, error: parentRes.error })
+      const nameRes = parseNewEntryName("folder", body?.name)
+      if (!nameRes.ok) return json(req, res, 400, { ok: false, error: nameRes.error })
+
+      const rel = buildProjectRelativePath(userIdRes.value, projectIdRes.value)
+      const projectAbs = safeResolveWithinBase(baseDir, rel)
+      const rootAbs = safeResolveWithinBase(projectAbs, rootRes.value)
+
+      const parentAbs = safeResolveWithinBase(rootAbs, parentRes.value)
+      const parentStat = await stat(parentAbs).catch(() => null)
+      if (!parentStat || !parentStat.isDirectory()) return json(req, res, 404, { ok: false, error: "parent folder not found" })
+
+      const targetRel = parentRes.value ? path.posix.join(parentRes.value, nameRes.value) : nameRes.value
+      const targetAbs = safeResolveWithinBase(rootAbs, targetRel)
+      const existing = await stat(targetAbs).catch(() => null)
+      if (existing) return json(req, res, 409, { ok: false, error: "path already exists" })
+
+      await mkdir(targetAbs, { recursive: false })
+      return json(req, res, 200, { ok: true, path: targetRel })
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/projects/write") {
+      const body = await readJsonBody(req, 8 * 1024 * 1024)
+
+      const userIdRes = parseId("userId", body?.userId)
+      if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
+      const projectIdRes = parseId("projectId", body?.projectId)
+      if (!projectIdRes.ok) return json(req, res, 400, { ok: false, error: projectIdRes.error })
+
+      const rootRes = normalizeProjectSubdir(body?.root || "game")
+      if (!rootRes.ok) return json(req, res, 400, { ok: false, error: rootRes.error })
+
+      const parentRes = normalizeRelativePath("parentPath", body?.parentPath)
+      if (!parentRes.ok) return json(req, res, 400, { ok: false, error: parentRes.error })
+      const nameRes = parseNewEntryName("file", body?.name)
+      if (!nameRes.ok) return json(req, res, 400, { ok: false, error: nameRes.error })
+
+      const content = typeof body?.content === "string" ? body.content : ""
+
+      const rel = buildProjectRelativePath(userIdRes.value, projectIdRes.value)
+      const projectAbs = safeResolveWithinBase(baseDir, rel)
+      const rootAbs = safeResolveWithinBase(projectAbs, rootRes.value)
+
+      const parentAbs = safeResolveWithinBase(rootAbs, parentRes.value)
+      const parentStat = await stat(parentAbs).catch(() => null)
+      if (!parentStat || !parentStat.isDirectory()) return json(req, res, 404, { ok: false, error: "parent folder not found" })
+
+      const targetRel = parentRes.value ? path.posix.join(parentRes.value, nameRes.value) : nameRes.value
+      const targetAbs = safeResolveWithinBase(rootAbs, targetRel)
+      try {
+        await writeFile(targetAbs, content, { encoding: "utf8", flag: "wx" })
+      } catch (e) {
+        if (e && typeof e === "object" && "code" in e && e.code === "EEXIST") {
+          return json(req, res, 409, { ok: false, error: "path already exists" })
+        }
+        throw e
+      }
+
+      return json(req, res, 200, { ok: true, path: targetRel })
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/projects/upload") {
+      const userIdRes = parseId("userId", url.searchParams.get("userId"))
+      if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
+      const projectIdRes = parseId("projectId", url.searchParams.get("projectId"))
+      if (!projectIdRes.ok) return json(req, res, 400, { ok: false, error: projectIdRes.error })
+
+      const rootRes = normalizeProjectSubdir(url.searchParams.get("root") || "game")
+      if (!rootRes.ok) return json(req, res, 400, { ok: false, error: rootRes.error })
+
+      const parentRes = normalizeRelativePath("parentPath", url.searchParams.get("parentPath"))
+      if (!parentRes.ok) return json(req, res, 400, { ok: false, error: parentRes.error })
+
+      const ctRes = parseMultipartContentType(req.headers["content-type"])
+      if (!ctRes.ok) return json(req, res, 400, { ok: false, error: ctRes.error })
+
+      const rel = buildProjectRelativePath(userIdRes.value, projectIdRes.value)
+      const projectAbs = safeResolveWithinBase(baseDir, rel)
+      const rootAbs = safeResolveWithinBase(projectAbs, rootRes.value)
+      const parentAbs = safeResolveWithinBase(rootAbs, parentRes.value)
+      const parentStat = await stat(parentAbs).catch(() => null)
+      if (!parentStat || !parentStat.isDirectory()) return json(req, res, 404, { ok: false, error: "parent folder not found" })
+
+      const buf = await readRawBody(req, 220 * 1024 * 1024)
+      const parts = parseMultipart(buf, ctRes.boundary)
+
+      const uploaded = []
+      for (const p of parts) {
+        const disp = parseContentDisposition(p.headers["content-disposition"])
+        if (disp.type !== "form-data") continue
+        const fieldName = String(disp.params.name || "")
+        if (fieldName !== "files") continue
+
+        const filenameRaw = disp.params.filename
+        if (!filenameRaw) continue
+        const nameRes = parseNewEntryName("file", filenameRaw)
+        if (!nameRes.ok) return json(req, res, 400, { ok: false, error: nameRes.error })
+
+        const targetRel = parentRes.value ? path.posix.join(parentRes.value, nameRes.value) : nameRes.value
+        const targetAbs = safeResolveWithinBase(rootAbs, targetRel)
+        try {
+          await writeFile(targetAbs, p.content, { flag: "wx" })
+        } catch (e) {
+          if (e && typeof e === "object" && "code" in e && e.code === "EEXIST") {
+            return json(req, res, 409, { ok: false, error: `path already exists: ${targetRel}` })
+          }
+          throw e
+        }
+        uploaded.push(targetRel)
+      }
+
+      if (uploaded.length === 0) return json(req, res, 400, { ok: false, error: "no files uploaded" })
+      return json(req, res, 200, { ok: true, files: uploaded })
+    }
+
     if (req.method === "GET" && url.pathname === "/api/projects/tree") {
       const userIdRes = parseId("userId", url.searchParams.get("userId"))
       if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
@@ -371,8 +607,10 @@ const server = http.createServer(async (req, res) => {
       }
 
       const mime = guessMimeFromPath(relativeFile)
-      const filename = path.basename(relativeFile).replaceAll('"', "'")
+      const filename = safeFilename(path.basename(relativeFile))
       const buf = await readFile(fileAbs)
+      const download = String(url.searchParams.get("download") || "").trim()
+      const dispositionType = download === "1" || download.toLowerCase() === "true" ? "attachment" : "inline"
 
       applyCors(req, res)
       res.writeHead(200, {
@@ -380,9 +618,66 @@ const server = http.createServer(async (req, res) => {
         "content-length": buf.length,
         "cache-control": "no-store",
         "x-content-type-options": "nosniff",
-        "content-disposition": `inline; filename="${filename}"`,
+        "content-disposition": `${dispositionType}; filename="${filename}"`,
       })
       return res.end(buf)
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/projects/folder/archive") {
+      const userIdRes = parseId("userId", url.searchParams.get("userId"))
+      if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
+      const projectIdRes = parseId("projectId", url.searchParams.get("projectId"))
+      if (!projectIdRes.ok) return json(req, res, 400, { ok: false, error: projectIdRes.error })
+
+      const rootRes = normalizeProjectSubdir(url.searchParams.get("root") || "game")
+      if (!rootRes.ok) return json(req, res, 400, { ok: false, error: rootRes.error })
+
+      const folderRes = normalizeRelativePath("path", url.searchParams.get("path"))
+      if (!folderRes.ok) return json(req, res, 400, { ok: false, error: folderRes.error })
+
+      const rel = buildProjectRelativePath(userIdRes.value, projectIdRes.value)
+      const projectAbs = safeResolveWithinBase(baseDir, rel)
+      const rootAbs = safeResolveWithinBase(projectAbs, rootRes.value)
+      const folderAbs = safeResolveWithinBase(rootAbs, folderRes.value)
+      const folderStat = await stat(folderAbs).catch(() => null)
+      if (!folderStat || !folderStat.isDirectory()) return json(req, res, 404, { ok: false, error: "folder not found" })
+
+      const folderName = safeFilename(path.basename(folderAbs) || "folder")
+
+      applyCors(req, res)
+      res.writeHead(200, {
+        "content-type": "application/gzip",
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-disposition": `attachment; filename="${folderName}.tar.gz"`,
+      })
+
+      const child = spawn("tar", ["-czf", "-", "."], { cwd: folderAbs })
+      child.stdout.pipe(res)
+
+      let stderr = ""
+      child.stderr.on("data", (chunk) => {
+        stderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk)
+      })
+
+      child.on("error", () => {
+        try {
+          res.writeHead(500, { "content-type": "application/json; charset=utf-8" })
+          res.end(JSON.stringify({ ok: false, error: "failed to spawn tar" }))
+        } catch {}
+      })
+
+      child.on("close", (code) => {
+        if (code === 0) return
+        try {
+          if (!res.headersSent) {
+            res.writeHead(500, { "content-type": "application/json; charset=utf-8" })
+          }
+          res.end(JSON.stringify({ ok: false, error: stderr.trim() || `tar exited with code ${code}` }))
+        } catch {}
+      })
+
+      return
     }
 
     return json(req, res, 404, { ok: false, error: "not found" })
