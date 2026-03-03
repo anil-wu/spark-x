@@ -18,7 +18,7 @@ services:
       - OPENCODE_CONFIG=/workspace/opencode.json
       - OPENCODE_CONFIG_PATH=/workspace/opencode.json
       - API_SERVICE_API_KEY=${API_SERVICE_API_KEY:-123456}
-      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+      # - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
     
       - SPARKX_API_BASE_URL=${SPARKX_API_BASE_URL:-https://host.docker.internal:8890}
       - OPENCODE_WORKSPACE_DIR=/workspace

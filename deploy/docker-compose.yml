@@ -7,6 +7,9 @@ services:
       - "${SERVICE_PORT:-6001}:8890"
     environment:
       - MYSQL_DSN=sparkplay:sparkplay@tcp(mysql)/sparkplay?charset=utf8mb4&parseTime=true&loc=Local
+      - SPARKX_SUPER_EMAIL=${SPARKX_SUPER_EMAIL:-}
+      - SPARKX_SUPER_PASSWORD=${SPARKX_SUPER_PASSWORD:-}
+      - SPARKX_SUPER_USERNAME=${SPARKX_SUPER_USERNAME:-}
     depends_on:
       mysql:
         condition: service_healthy

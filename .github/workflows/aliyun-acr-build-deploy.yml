@@ -222,6 +222,10 @@ jobs:
           ACR_USERNAME: ${{ secrets.ALIYUN_ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ALIYUN_ACR_PASSWORD }}
           SPARKX_API_BASE_URL: ${{ secrets.SPARKX_API_BASE_URL }}
+          SPARKX_SUPER_EMAIL: ${{ secrets.SPARKX_SUPER_EMAIL }}
+          SPARKX_SUPER_PASSWORD: ${{ secrets.SPARKX_SUPER_PASSWORD }}
+          SPARKX_SUPER_PASSWORD_HASH: ${{ secrets.SPARKX_SUPER_PASSWORD_HASH }}
+          SPARKX_SUPER_USERNAME: ${{ secrets.SPARKX_SUPER_USERNAME }}
         run: |
           set -euo pipefail
           if [ -z "${ACR_REGISTRY:-}" ] || [ -z "${ACR_NAMESPACE:-}" ] || [ -z "${ACR_USERNAME:-}" ] || [ -z "${ACR_PASSWORD:-}" ]; then
@@ -262,6 +266,10 @@ jobs:
           export WEB_TAG="${WEB_TAG}"
           export WEB_ADMIN_TAG="${WEB_ADMIN_TAG}"
           export SPARKX_API_BASE_URL="${SPARKX_API_BASE_URL}"
+          export SPARKX_SUPER_EMAIL="${SPARKX_SUPER_EMAIL:-}"
+          export SPARKX_SUPER_PASSWORD="${SPARKX_SUPER_PASSWORD:-}"
+          export SPARKX_SUPER_PASSWORD_HASH="${SPARKX_SUPER_PASSWORD_HASH:-}"
+          export SPARKX_SUPER_USERNAME="${SPARKX_SUPER_USERNAME:-}"
 
           DOCKER_CONFIG_DIR="$(mktemp -d)"
           export DOCKER_CONFIG="\${DOCKER_CONFIG_DIR}"

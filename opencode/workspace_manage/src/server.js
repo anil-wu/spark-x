@@ -1,6 +1,6 @@
 import http from "node:http"
 import path from "node:path"
-import { mkdir, stat, unlink, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, stat, unlink, writeFile } from "node:fs/promises"
 import { URL } from "node:url"
 
 function readEnvInt(name, fallback) {
@@ -106,6 +106,78 @@ function buildProjectRelativePath(userId, projectId) {
   return path.posix.join(userId, projectId)
 }
 
+function normalizeProjectSubdir(raw) {
+  const value = String(raw || "")
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+  if (!value) return { ok: false, error: "root is required" }
+  if (value.includes("..")) return { ok: false, error: "root is invalid" }
+  return { ok: true, value }
+}
+
+function parseQueryInt(raw, fallback, { min, max } = {}) {
+  const n = Number.parseInt(String(raw || ""), 10)
+  const value = Number.isFinite(n) ? n : fallback
+  if (typeof min === "number" && value < min) return min
+  if (typeof max === "number" && value > max) return max
+  return value
+}
+
+function shouldIgnoreEntry(name) {
+  const n = String(name || "")
+  if (!n) return true
+  if (n === ".git") return true
+  if (n === "node_modules") return true
+  if (n === ".next") return true
+  if (n === "dist") return true
+  if (n === "build") return true
+  if (n === ".opencode") return true
+  return false
+}
+
+async function buildFileTree(rootAbs, { maxDepth, maxEntries }) {
+  let remaining = maxEntries
+
+  async function walk(absDir, relDir, depth) {
+    if (remaining <= 0) return []
+    if (depth > maxDepth) return []
+
+    let entries
+    try {
+      entries = await readdir(absDir, { withFileTypes: true })
+    } catch {
+      return []
+    }
+
+    entries = entries.filter(d => !shouldIgnoreEntry(d.name))
+    entries.sort((a, b) => {
+      if (a.isDirectory() && !b.isDirectory()) return -1
+      if (!a.isDirectory() && b.isDirectory()) return 1
+      return a.name.localeCompare(b.name)
+    })
+
+    const nodes = []
+    for (const entry of entries) {
+      if (remaining <= 0) break
+      remaining -= 1
+
+      const relPath = relDir ? path.posix.join(relDir, entry.name) : entry.name
+      if (entry.isDirectory()) {
+        const absChild = safeResolveWithinBase(rootAbs, relPath)
+        const children = await walk(absChild, relPath, depth + 1)
+        nodes.push({ path: relPath, name: entry.name, type: "folder", children })
+      } else if (entry.isFile()) {
+        nodes.push({ path: relPath, name: entry.name, type: "file" })
+      }
+    }
+    return nodes
+  }
+
+  return { path: "", name: path.basename(rootAbs), type: "folder", children: await walk(rootAbs, "", 0) }
+}
+
 const baseDir = normalizeBaseDir(process.env.OPENCODE_WORKSPACE_DIR || process.env.WORKSPACE_DIR)
 const port = readEnvInt("PORT", 7070)
 
@@ -148,6 +220,56 @@ const server = http.createServer(async (req, res) => {
       } catch {}
 
       return json(req, res, 200, { ok: true, created, path: abs, userinfoPath: userinfoAbs })
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/projects/tree") {
+      const userIdRes = parseId("userId", url.searchParams.get("userId"))
+      if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
+      const projectIdRes = parseId("projectId", url.searchParams.get("projectId"))
+      if (!projectIdRes.ok) return json(req, res, 400, { ok: false, error: projectIdRes.error })
+
+      const rootRes = normalizeProjectSubdir(url.searchParams.get("root") || "game")
+      if (!rootRes.ok) return json(req, res, 400, { ok: false, error: rootRes.error })
+
+      const maxDepth = parseQueryInt(url.searchParams.get("maxDepth"), 6, { min: 0, max: 12 })
+      const maxEntries = parseQueryInt(url.searchParams.get("maxEntries"), 5000, { min: 1, max: 20000 })
+
+      const rel = buildProjectRelativePath(userIdRes.value, projectIdRes.value)
+      const projectAbs = safeResolveWithinBase(baseDir, rel)
+      const abs = safeResolveWithinBase(projectAbs, rootRes.value)
+      const s = await stat(abs).catch(() => null)
+      if (!s || !s.isDirectory()) return json(req, res, 404, { ok: false, error: "project workspace not found" })
+
+      const tree = await buildFileTree(abs, { maxDepth, maxEntries })
+      return json(req, res, 200, { ok: true, tree })
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/projects/file") {
+      const userIdRes = parseId("userId", url.searchParams.get("userId"))
+      if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
+      const projectIdRes = parseId("projectId", url.searchParams.get("projectId"))
+      if (!projectIdRes.ok) return json(req, res, 400, { ok: false, error: projectIdRes.error })
+
+      const rootRes = normalizeProjectSubdir(url.searchParams.get("root") || "game")
+      if (!rootRes.ok) return json(req, res, 400, { ok: false, error: rootRes.error })
+
+      const relativeFile = String(url.searchParams.get("path") || "").trim()
+      if (!relativeFile) return json(req, res, 400, { ok: false, error: "path is required" })
+
+      const rel = buildProjectRelativePath(userIdRes.value, projectIdRes.value)
+      const projectAbs = safeResolveWithinBase(baseDir, rel)
+      const rootAbs = safeResolveWithinBase(projectAbs, rootRes.value)
+      const fileAbs = safeResolveWithinBase(rootAbs, relativeFile)
+      const fileStat = await stat(fileAbs).catch(() => null)
+      if (!fileStat || !fileStat.isFile()) return json(req, res, 404, { ok: false, error: "file not found" })
+
+      const maxBytes = parseQueryInt(url.searchParams.get("maxBytes"), 1024 * 1024, { min: 1024, max: 8 * 1024 * 1024 })
+      if (fileStat.size > maxBytes) {
+        return json(req, res, 413, { ok: false, error: "file too large", sizeBytes: fileStat.size, maxBytes })
+      }
+
+      const content = await readFile(fileAbs, "utf8")
+      return json(req, res, 200, { ok: true, path: relativeFile, sizeBytes: fileStat.size, content })
     }
 
     return json(req, res, 404, { ok: false, error: "not found" })
