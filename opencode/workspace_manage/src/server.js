@@ -137,6 +137,74 @@ function shouldIgnoreEntry(name) {
   return false
 }
 
+function guessMimeFromPath(filePath) {
+  const ext = path.extname(String(filePath || "")).toLowerCase()
+  switch (ext) {
+    case ".png":
+      return "image/png"
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg"
+    case ".gif":
+      return "image/gif"
+    case ".webp":
+      return "image/webp"
+    case ".svg":
+      return "image/svg+xml"
+    case ".mp3":
+      return "audio/mpeg"
+    case ".wav":
+      return "audio/wav"
+    case ".ogg":
+      return "audio/ogg"
+    case ".m4a":
+      return "audio/mp4"
+    case ".mp4":
+      return "video/mp4"
+    case ".webm":
+      return "video/webm"
+    case ".json":
+      return "application/json; charset=utf-8"
+    case ".md":
+    case ".markdown":
+      return "text/markdown; charset=utf-8"
+    case ".yml":
+    case ".yaml":
+      return "text/yaml; charset=utf-8"
+    case ".xml":
+      return "application/xml; charset=utf-8"
+    case ".html":
+    case ".htm":
+      return "text/html; charset=utf-8"
+    case ".css":
+      return "text/css; charset=utf-8"
+    case ".js":
+    case ".jsx":
+      return "text/javascript; charset=utf-8"
+    case ".ts":
+    case ".tsx":
+      return "text/typescript; charset=utf-8"
+    case ".txt":
+    case ".log":
+    case ".env":
+    case ".gitignore":
+      return "text/plain; charset=utf-8"
+    default:
+      return "application/octet-stream"
+  }
+}
+
+function isTextLikeMime(mime) {
+  const value = String(mime || "").toLowerCase()
+  if (value.startsWith("text/")) return true
+  if (value.startsWith("application/json")) return true
+  if (value.startsWith("application/xml")) return true
+  if (value.startsWith("text/javascript")) return true
+  if (value.startsWith("text/typescript")) return true
+  if (value.startsWith("image/svg+xml")) return true
+  return false
+}
+
 async function buildFileTree(rootAbs, { maxDepth, maxEntries }) {
   let remaining = maxEntries
 
@@ -268,8 +336,53 @@ const server = http.createServer(async (req, res) => {
         return json(req, res, 413, { ok: false, error: "file too large", sizeBytes: fileStat.size, maxBytes })
       }
 
+      const mime = guessMimeFromPath(relativeFile)
+      const isBinary = !isTextLikeMime(mime)
+      if (isBinary) {
+        return json(req, res, 200, { ok: true, path: relativeFile, sizeBytes: fileStat.size, mime, isBinary: true, content: "" })
+      }
+
       const content = await readFile(fileAbs, "utf8")
-      return json(req, res, 200, { ok: true, path: relativeFile, sizeBytes: fileStat.size, content })
+      return json(req, res, 200, { ok: true, path: relativeFile, sizeBytes: fileStat.size, mime, isBinary: false, content })
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/projects/file/raw") {
+      const userIdRes = parseId("userId", url.searchParams.get("userId"))
+      if (!userIdRes.ok) return json(req, res, 400, { ok: false, error: userIdRes.error })
+      const projectIdRes = parseId("projectId", url.searchParams.get("projectId"))
+      if (!projectIdRes.ok) return json(req, res, 400, { ok: false, error: projectIdRes.error })
+
+      const rootRes = normalizeProjectSubdir(url.searchParams.get("root") || "game")
+      if (!rootRes.ok) return json(req, res, 400, { ok: false, error: rootRes.error })
+
+      const relativeFile = String(url.searchParams.get("path") || "").trim()
+      if (!relativeFile) return json(req, res, 400, { ok: false, error: "path is required" })
+
+      const rel = buildProjectRelativePath(userIdRes.value, projectIdRes.value)
+      const projectAbs = safeResolveWithinBase(baseDir, rel)
+      const rootAbs = safeResolveWithinBase(projectAbs, rootRes.value)
+      const fileAbs = safeResolveWithinBase(rootAbs, relativeFile)
+      const fileStat = await stat(fileAbs).catch(() => null)
+      if (!fileStat || !fileStat.isFile()) return json(req, res, 404, { ok: false, error: "file not found" })
+
+      const maxBytes = parseQueryInt(url.searchParams.get("maxBytes"), 20 * 1024 * 1024, { min: 1024, max: 200 * 1024 * 1024 })
+      if (fileStat.size > maxBytes) {
+        return json(req, res, 413, { ok: false, error: "file too large", sizeBytes: fileStat.size, maxBytes })
+      }
+
+      const mime = guessMimeFromPath(relativeFile)
+      const filename = path.basename(relativeFile).replaceAll('"', "'")
+      const buf = await readFile(fileAbs)
+
+      applyCors(req, res)
+      res.writeHead(200, {
+        "content-type": mime,
+        "content-length": buf.length,
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-disposition": `inline; filename="${filename}"`,
+      })
+      return res.end(buf)
     }
 
     return json(req, res, 404, { ok: false, error: "not found" })
