@@ -13,4 +13,4 @@ RUN printf '%s\n' \
 
 COPY workspace_manage /opt/workspace_manage
 COPY start-all.sh /opt/start-all.sh
-RUN chmod +x /opt/start-all.sh
+RUN sed -i 's/\r$//' /opt/start-all.sh && chmod +x /opt/start-all.sh

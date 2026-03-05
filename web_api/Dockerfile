@@ -1,6 +1,8 @@
 FROM golang:1.23-alpine AS builder
 
 ARG COMMIT_SHA=unknown
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=off
 
 # Install goctl
 RUN go install github.com/zeromicro/go-zero/tools/goctl@latest
